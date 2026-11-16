@@ -92,6 +92,8 @@ button.chip{cursor:pointer}
 .sidebar.closed{visibility:hidden;transition:transform .5s cubic-bezier(.22,1,.36,1),opacity .4s ease,visibility 0s linear .5s}
 .toggle{left:max(12px,env(safe-area-inset-left,0px))}
 li input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent)}
+.note{margin:0 0 12px;padding:10px 14px;border-radius:12px;background:var(--glass);border:1px solid var(--glass-b);font-size:.9rem}
+@media (max-width:767px){.col,.sidebar,.toggle{zoom:.9}.input{font-size:18px}}
 @media (min-width:768px){.scrim{display:none}}
 @media (pointer:coarse){.nav,.btn,.toggle,.qty button{min-height:44px}.qty button{min-width:44px}.chip{padding:6px 12px}}
 @media (max-width:600px){
@@ -116,11 +118,49 @@ li input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent)}
 var state={
   activeView:'tasks',
   sidebarOpen:window.matchMedia('(min-width:768px)').matches,
-  tasks:[{id:1,text:'Conferir o pedido do fornecedor',done:false,due:addDays(2)},{id:2,text:'Fechar a escala da semana',done:false,due:addDays(-1)}],
-  stock:[{id:1,name:'Farinha (kg)',qty:12,min:5},{id:2,name:'Açúcar (kg)',qty:3,min:5},{id:3,name:'Embalagens',qty:40,min:20}],
+  tasks:[],
+  stock:[],
   calMonth:new Date().getMonth(),calYear:new Date().getFullYear()
 };
-var nextId=10;
+
+/* ---------- Armazenamento compartilhado em tempo real (db) ---------- */
+var store={db:null,note:'Carregando dados…',loaded:{tasks:false,stock:false},server:{tasks:[],stock:[]},timer:null};
+function clone(o){return Object.assign({},o)}
+function newId(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
+function noteHTML(){return store.note?'<p class="note" role="status">'+esc(store.note)+'</p>':''}
+function resync(){state.tasks=store.server.tasks.map(clone);state.stock=store.server.stock.map(clone)}
+function dbop(col,id,op,data){
+  if(!store.db) return;
+  var ref=store.db.collection(col).doc(id);
+  var p=op==='set'?ref.set(data):op==='update'?ref.update(data):ref.delete();
+  p.catch(function(){
+    store.note='Não foi possível salvar: seu acesso pode ser somente leitura. A alteração foi desfeita.';
+    resync();render();
+  });
+}
+function listen(col){
+  store.db.collection(col).onSnapshot(function(snap){
+    var arr=snap.docs.map(function(d){var o=d.data()||{};o.id=d.id;return o});
+    store.server[col]=arr;state[col]=arr.map(clone);
+    store.loaded[col]=true;
+    if(store.loaded.tasks&&store.loaded.stock){
+      clearTimeout(store.timer);
+      if(/^(Carregando|Ainda não)/.test(store.note)) store.note='';
+    }
+    render();
+  },function(){store.note='Não foi possível carregar os dados salvos.';render()});
+}
+function initStore(){
+  var off=function(){store.note='Armazenamento indisponível: as alterações não serão salvas ao recarregar.';render()};
+  if(!(window.claude&&window.claude.use)){off();return}
+  store.timer=setTimeout(function(){
+    if(!(store.loaded.tasks&&store.loaded.stock)){store.note='Ainda não foi possível alcançar os dados salvos.';render()}
+  },10000);
+  window.claude.use('db').then(function(db){
+    if(!db){clearTimeout(store.timer);off();return}
+    store.db=db;listen('tasks');listen('stock');
+  }).catch(function(){clearTimeout(store.timer);off()});
+}
 var root=document.getElementById('root');
 
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -199,7 +239,7 @@ function viewStock(){
 
 /* ---------- Layout do app ---------- */
 var NAV=[['tasks','Tarefas'],['calendar','Calendário'],['stock','Estoque']];
-function viewHTML(){var v=state.activeView;return v==='tasks'?viewTasks():v==='calendar'?viewCalendar():viewStock()}
+function viewHTML(){var v=state.activeView;return noteHTML()+(v==='tasks'?viewTasks():v==='calendar'?viewCalendar():viewStock())}
 function navHTML(){
   return NAV.map(function(n){
     return '<button class="nav" data-act="nav" data-view="'+n[0]+'"'+(state.activeView===n[0]?' aria-current="page"':'')+'>'+n[1]+'</button>';
@@ -207,8 +247,8 @@ function navHTML(){
 }
 function renderApp(){
   var o=state.sidebarOpen;
-  root.innerHTML='<div class="wall"></div><div class="scrim'+(o?' on':'')+'" data-act="sidebar"></div>'+
-    '<div class="shell"><button class="toggle" data-act="sidebar" aria-controls="menu" aria-expanded="'+o+'">'+(o?'Ocultar menu':'Menu')+'</button>'+
+  root.innerHTML='<div class="wall"></div>'+
+    '<div class="shell"><div class="scrim'+(o?' on':'')+'" data-act="sidebar"></div><button class="toggle" data-act="sidebar" aria-controls="menu" aria-expanded="'+o+'">'+(o?'Ocultar menu':'Menu')+'</button>'+
     '<aside id="menu" class="sidebar'+(o?'':' closed')+'"><nav>'+navHTML()+'</nav></aside>'+
     '<div class="main'+(o?'':' full')+'"><div class="col" id="col">'+viewHTML()+'</div></div></div>';
 }
@@ -255,31 +295,33 @@ root.addEventListener('click',function(e){
   if(cell){showTip(cell);return}
   if(!e.target.closest('#tip'))hideTip();
   var el=e.target.closest('[data-act]');if(!el)return;
-  var act=el.dataset.act,id=+el.dataset.id;
+  var act=el.dataset.act,id=el.dataset.id;
   if(act==='nav'){state.activeView=el.dataset.view;if(!isDesktop())setSidebar(false);var sh=root.querySelector('.shell');if(sh)sh.scrollTop=0}
   else if(act==='sidebar'){toggleSidebar();return}
   else if(act==='goto-date'){var p=el.dataset.date.split('-');state.calYear=+p[0];state.calMonth=+p[1]-1;state.activeView='calendar'}
   else if(act==='add-stock'){
     var sn=document.getElementById('stock-name'),sq=document.getElementById('stock-qty'),sm=document.getElementById('stock-min');
     var nome=sn.value.trim();if(!nome){sn.focus();return}
-    state.stock.push({id:nextId++,name:nome,qty:Math.max(0,parseInt(sq.value,10)||0),min:Math.max(0,parseInt(sm.value,10)||0)});
+    var sid=newId(),sitem={name:nome,qty:Math.max(0,parseInt(sq.value,10)||0),min:Math.max(0,parseInt(sm.value,10)||0)};
+    state.stock.push(Object.assign({id:sid},sitem));dbop('stock',sid,'set',sitem);
     sn.value='';sq.value='';sm.value='';
   }
-  else if(act==='del-stock') state.stock=state.stock.filter(function(s){return s.id!==id});
+  else if(act==='del-stock'){state.stock=state.stock.filter(function(s){return s.id!==id});dbop('stock',id,'delete')}
   else if(act==='add-task'){
     var inp=document.getElementById('new-task');var t=inp.value.trim();
     if(!t){inp.focus();return}
     var dueEl=document.getElementById('new-due');
-    state.tasks.push({id:nextId++,text:t,done:false,due:dueEl.value});inp.value='';dueEl.value='';
+    var tid=newId(),titem={text:t,done:false,due:dueEl.value,createdAt:Date.now()};
+    state.tasks.push(Object.assign({id:tid},titem));dbop('tasks',tid,'set',titem);inp.value='';dueEl.value='';
   }
-  else if(act==='del-task') state.tasks=state.tasks.filter(function(t){return t.id!==id});
+  else if(act==='del-task'){state.tasks=state.tasks.filter(function(t){return t.id!==id});dbop('tasks',id,'delete')}
   else if(act==='prev-month'||act==='next-month'){
     state.calMonth+=act==='next-month'?1:-1;
     if(state.calMonth<0){state.calMonth=11;state.calYear--}
     if(state.calMonth>11){state.calMonth=0;state.calYear++}
   }
   else if(act==='inc'||act==='dec'){
-    state.stock.forEach(function(s){if(s.id===id)s.qty=Math.max(0,s.qty+(act==='inc'?1:-1))});
+    state.stock.forEach(function(s){if(s.id===id){s.qty=Math.max(0,s.qty+(act==='inc'?1:-1));dbop('stock',id,'update',{qty:s.qty})}});
   }
   else return;
   render();
@@ -287,7 +329,7 @@ root.addEventListener('click',function(e){
 root.addEventListener('change',function(e){
   var el=e.target;
   if(el.dataset.act==='toggle-task'){
-    state.tasks.forEach(function(t){if(t.id===+el.dataset.id){t.done=el.checked}});
+    state.tasks.forEach(function(t){if(t.id===el.dataset.id){t.done=el.checked;dbop('tasks',t.id,'update',{done:t.done})}});
     render();
   }
 });
@@ -305,6 +347,7 @@ document.addEventListener('keydown',function(e){
   if(!isDesktop()&&state.sidebarOpen)setSidebar(false);
 });
 render();
+initStore();
 })();
 </script>
 </body>
